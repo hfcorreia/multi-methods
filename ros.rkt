@@ -70,7 +70,6 @@
 
 (define (find-type predicate)
   (define (find-type-aux predicate types)
-    (map (lambda (x) (displayln (type-predicate x))) types)
     (let ((found-predicate #f))
       (cond ((null? types) #f)
             ((equal? predicate (type-predicate (car types))) (car types))
@@ -81,6 +80,17 @@
                    found-predicate
                    (find-type-aux predicate (type-subtypes (cdr types)))))))))
   (find-type-aux predicate (type-subtypes type-tree)))
+
+
+(define (find-type-level predicate)
+  (define (find-type-level-aux types lvl)
+    (cond ((null? types) #f)
+          ((equal? predicate (type-predicate (car types))) lvl)
+          (else (let ((result (find-type-level-aux (type-subtypes (car types)) (add1 lvl))))
+                  (if (not (false? result))
+                      result
+                      (find-type-level-aux (cdr types) lvl))))))
+  (find-type-level-aux (type-subtypes type-tree) 1))
 
 (define (print-tree)
   (define (print-tree-aux types lvl)
