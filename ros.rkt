@@ -11,7 +11,6 @@
                                 (if (equal? (length (generic-function-parameters instance)) (length args))
                                     (eval `(,(method-body temp-method) ,@args))
                                     (error "Invalid number of args")))))
-
 ;;; Representation of a method
 (struct method (parameters body))
 
@@ -20,7 +19,7 @@
 (define type-tree (type 'T? '()))
 ;;;; Main Syntax Rules
 ;;; Defines a new generic function
-(define-syntax-rule 
+(define-syntax-rule
   (defgeneric name parameters)
   (define name (generic-function 'parameters '() )))
 
@@ -39,7 +38,11 @@
   (set-generic-function-methods! method-name (update-gen-method method-name parameteres body)))
 
 (define (update-gen-method name parameters body)
-  (append (generic-function-methods name) (list (make-method parameters body))))
+  (define (update-gen-method-aux methods parameters body result)
+    (cond ((null? methods) (append result (list (make-method parameters body))))
+          ((equal? parameters (method-parameters (car methods))) (update-gen-method-aux (cdr methods) parameters body result))
+          (else (update-gen-method-aux (cdr methods) parameters body (append result (list (car methods)))))))
+  (update-gen-method-aux (generic-function-methods name) parameters body '()))
 
 (define (make-method parameters body)
   (let ((args (make-args-list parameters)))
@@ -49,6 +52,14 @@
   (if (null? parameters)
       '()
       (cons (caar parameters) (make-args-list (cdr parameters)))))
+
+(define (method-types method)
+  (define (method-types-aux parameters)
+    (if (null? parameters)
+        '()
+        (cons (eval (cadar parameters)) (method-types-aux (cdr parameters)))))
+  (method-types-aux (method-parameters method)))
+
 
 (define (can-apply? parameters  args)
   (define (can-apply-aux parameters args)
@@ -103,7 +114,7 @@
   (if (or (null? method-predicates1) (null? method-predicates2))
       #f
       (or (more-specific-predicate? (eval (cadar method-predicates1)) (eval (cadar method-predicates2))) 
-           (more-specific-predicates? (cdr method-predicates1) (cdr method-predicates2)))))
+          (more-specific-predicates? (cdr method-predicates1) (cdr method-predicates2)))))
 
 ;;;; Test Examples
 ;;; Aux test functions
@@ -121,10 +132,13 @@
 (defgeneric fact (n))
 
 (defmethod fact ((n zero?))
-  1)
+  0)
 
 (defmethod fact ((n integer?))
   (* n (fact (- n 1))))
+
+(defmethod fact ((n zero?))
+  1)
 
 ;;; Add example
 (defgeneric add (x y))
@@ -138,6 +152,15 @@
 (defmethod add ((x string?) (y string?))
   (string-append x y))
 
+;;; what are you test
+(defgeneric what-are-you? (x))
+
+(defmethod what-are-you? ((x integer?))
+  "an integer")
+
+(defmethod what-are-you? ((x positive?))
+  "an integer")
+
 ;;; Test
 (define (test-can-apply) (can-apply? '((x number?) (y number?)) '("12" 2)))
 (define (test-find-method) (find-method (generic-function-methods add) '(1 1)))
@@ -147,6 +170,6 @@
 (defsubtype real? complex?)
 (defsubtype rational? real?)
 (defsubtype integer? rational?)
+(defsubtype positive? rational?)
 (defsubtype zero? integer?)
 (defsubtype string? zero?)
-
