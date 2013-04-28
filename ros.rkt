@@ -1,4 +1,6 @@
 #lang racket
+(require racket/trace) ; Enables trace!
+
 ;;; Representation of a generic function
 (struct generic-function (parameters methods)
   #:mutable
@@ -58,9 +60,11 @@
       (can-apply-aux parameters args)))
 
 (define (find-method methods args)
-  (cond ((null? methods) (error "Method missing for arguments" args))
-        ((can-apply? (method-parameters (car methods)) args) (car methods))
-        (else (find-method (cdr methods) args))))
+  (define (find-method-aux methods args)
+    (cond ((null? methods) (error "Method missing for arguments" args))
+          ((can-apply? (method-parameters (car methods)) args) (car methods))
+          (else (find-method (cdr methods) args))))
+  (find-method-aux (sort methods more-specific-method?) args)) 
 
 (define (add-subtype predicate1 predicate2)
   (let ((found-type  (find-type predicate2)))
@@ -70,15 +74,12 @@
 
 (define (find-type predicate)
   (define (find-type-aux predicate types)
-    (let ((found-predicate #f))
-      (cond ((null? types) #f)
-            ((equal? predicate (type-predicate (car types))) (car types))
-            (else
-             (begin 
-               (set! found-predicate (find-type-aux predicate (type-subtypes (car types))))
-               (if (not (false? found-predicate))
-                   found-predicate
-                   (find-type-aux predicate (type-subtypes (cdr types)))))))))
+    (cond ((null? types) #f)
+          ((equal? predicate (type-predicate (car types))) (car types))
+          (else (let ((found-predicate (find-type-aux predicate (type-subtypes (car types)))))
+                  (if (not (false? found-predicate))
+                      found-predicate
+                      (find-type-aux predicate (type-subtypes (cdr types))))))))
   (find-type-aux predicate (type-subtypes type-tree)))
 
 
@@ -92,6 +93,20 @@
                       (find-type-level-aux (cdr types) lvl))))))
   (find-type-level-aux (type-subtypes type-tree) 1))
 
+(define (more-specific-method? method1 method2)
+  (more-specific-predicates? (method-parameters method1) (method-parameters method2)))
+
+(define (more-specific-predicate? predicate1 predicate2)
+  (> (find-type-level predicate1) (find-type-level predicate2)))
+
+(define (more-specific-predicates? method-predicates1 method-predicates2)
+  (if (or (null? method-predicates1) (null? method-predicates2))
+      #f
+      (or (more-specific-predicate? (eval (cadar method-predicates1)) (eval (cadar method-predicates2))) 
+           (more-specific-predicates? (cdr method-predicates1) (cdr method-predicates2)))))
+
+;;;; Test Examples
+;;; Aux test functions
 (define (print-tree)
   (define (print-tree-aux types lvl)
     (if (not (null? types))
@@ -100,9 +115,8 @@
           (displayln (cons (type-predicate (car types)) lvl))
           (print-tree-aux (cdr types)  (+ lvl 1)))
         #f))
-  (print-tree-aux (type-subtypes type-tree) 0))
+  (print-tree-aux (type-subtypes type-tree) 1))
 
-;;;; Test Examples
 ;;; Factorial example
 (defgeneric fact (n))
 
@@ -118,6 +132,9 @@
 (defmethod add ((x number?) (y number?))
   (+ x y))
 
+(defmethod add ((x integer?) (y integer?))
+  (+ x y 10000000))
+
 (defmethod add ((x string?) (y string?))
   (string-append x y))
 
@@ -131,3 +148,5 @@
 (defsubtype rational? real?)
 (defsubtype integer? rational?)
 (defsubtype zero? integer?)
+(defsubtype string? zero?)
+
