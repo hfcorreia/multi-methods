@@ -13,6 +13,9 @@
 ;;; Representation of a method
 (struct method (parameters body))
 
+;;; Representation of a type
+(struct type (predicate [subtypes #:mutable]))
+(define type-tree (type 'T? '()))
 ;;;; Main Syntax Rules
 ;;; Defines a new generic function
 (define-syntax-rule 
@@ -24,6 +27,12 @@
   (defmethod method-name ( (arg . predicate) ... ) body)
   (make-gen-method method-name '( (arg . predicate) ... ) 'body))
 
+;;; Defines subtype relations
+(define-syntax-rule
+  (defsubtype predicate1 predicate2)
+  (add-subtype predicate1 predicate2))
+
+;;;; Aux Functions
 (define (make-gen-method method-name parameteres body)
   (set-generic-function-methods! method-name (update-gen-method method-name parameteres body)))
 
@@ -53,6 +62,36 @@
         ((can-apply? (method-parameters (car methods)) args) (car methods))
         (else (find-method (cdr methods) args))))
 
+(define (add-subtype predicate1 predicate2)
+  (let ((found-type  (find-type predicate2)))
+    (if (false? found-type)
+        (set-type-subtypes! type-tree (append (type-subtypes type-tree) (list (type predicate2 (list (type predicate1 '()))))))
+        (set-type-subtypes! found-type (append (type-subtypes found-type) (list (type predicate1 '())))))))
+
+(define (find-type predicate)
+  (define (find-type-aux predicate types)
+    (map (lambda (x) (displayln (type-predicate x))) types)
+    (let ((found-predicate #f))
+      (cond ((null? types) #f)
+            ((equal? predicate (type-predicate (car types))) (car types))
+            (else
+             (begin 
+               (set! found-predicate (find-type-aux predicate (type-subtypes (car types))))
+               (if (not (false? found-predicate))
+                   found-predicate
+                   (find-type-aux predicate (type-subtypes (cdr types)))))))))
+  (find-type-aux predicate (type-subtypes type-tree)))
+
+(define (print-tree)
+  (define (print-tree-aux types lvl)
+    (if (not (null? types))
+        (begin 
+          (print-tree-aux (type-subtypes (car types)) (+ lvl 1))
+          (displayln (cons (type-predicate (car types)) lvl))
+          (print-tree-aux (cdr types)  (+ lvl 1)))
+        #f))
+  (print-tree-aux (type-subtypes type-tree) 0))
+
 ;;;; Test Examples
 ;;; Factorial example
 (defgeneric fact (n))
@@ -75,3 +114,10 @@
 ;;; Test
 (define (test-can-apply) (can-apply? '((x number?) (y number?)) '("12" 2)))
 (define (test-find-method) (find-method (generic-function-methods add) '(1 1)))
+
+;;; Test subtypes
+(defsubtype complex? number?)
+(defsubtype real? complex?)
+(defsubtype rational? real?)
+(defsubtype integer? rational?)
+(defsubtype zero? integer?)
