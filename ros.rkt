@@ -29,13 +29,17 @@
 
 ;;; Defines a new generic method
 (define-syntax-rule
-  (defmethod method-name ( (arg . predicate) ... ) body ...)
-  (make-gen-method method-name '( (arg . predicate) ... ) '(begin body ...)))
+  (defmethod method-name ( (arg . predicate) ... ) instr ...)
+  (make-gen-method method-name '( (arg . predicate) ... ) '(begin instr ...)))
 
 ;;; Defines subtype relations
 (define-syntax-rule
   (defsubtype predicate1 predicate2)
   (add-subtype predicate1 predicate2))
+
+;;; method-types
+(define (method-types method)
+  (map (lambda (x) (eval (cadr x))) (method-parameters method)))
 
 ;;;; Aux Functions
 (define (make-gen-method method-name parameteres body)
@@ -57,30 +61,37 @@
 (define (can-apply? parameters  args)
   (cond ((not (equal? (length parameters) (length args))) #f)
         ((or (null? parameters) (null? args)) #t)
-        ((not (apply (eval (cadar parameters)) (list (car args)))) #f)
+        ((not (try-apply (cadar parameters) (list (car args)))) #f)
         (else (can-apply? (cdr parameters) (cdr args)))))
 
+(define (try-apply predicate arg)
+  (with-handlers ([exn:fail? (lambda (exn) #f)])
+   (apply (eval predicate) arg)))
+
 (define (find-method methods args)
-  (car (sort (applicable-methods methods args) more-specific-method?)))
+  (let ((found-methods (sort (applicable-methods methods args) more-specific-method?)))
+    (if (not (null? found-methods))
+        (car found-methods)
+        (error "Method missing for arguments" args))))
 
 (define (applicable-methods methods args)
   (filter (lambda (method) (can-apply? (method-parameters method) args)) methods))
 
 (define (add-subtype subtype supertype)
-  (let ((found-supertype (find-predicate supertype))
-        (found-subtype (find-predicate subtype)))
+  (let ((found-supertype? (find-predicate supertype))
+        (found-subtype? (find-predicate subtype)))
     (cond 
       ;; subtype and supertype allready exists
-      ((and (not (false? found-subtype)) (not (false? found-supertype)))
-       (add-supertype found-subtype found-supertype))
+      ((and (not (false? found-subtype?)) (not (false? found-supertype?)))
+       (add-supertype found-subtype? found-supertype?))
       ;; subtype exists but super does not
-      ((and (not (false? found-subtype)) (false? found-supertype))
+      ((and (not (false? found-subtype?)) (false? found-supertype?))
        (let ((super (type supertype (list king-type))))
-         ((add-supertype found-subtype super)
+         ((add-supertype found-subtype? super)
           (hash-set! predicates-hash supertype super))))
       ;; subtype doesn't exist but super does
-      ((and (false? found-subtype) (not (false? found-supertype))) 
-       (hash-set! predicates-hash subtype (type subtype (list found-supertype))))
+      ((and (false? found-subtype?) (not (false? found-supertype?))) 
+       (hash-set! predicates-hash subtype (type subtype (list found-supertype?))))
       ;; both super and sub types don't exist
       (else (let* ((super (type supertype (list king-type)))             
                    (sub (type subtype (list super))))
@@ -109,19 +120,25 @@
   (or (not (false? (member type2 supertypes1)))
       (ormap (lambda (super) (more-specific-predicate? (type-supertypes super) type2)) supertypes1)))
 
-
 ;;;; Test Examples
 ;;; Factorial example
 (defgeneric fact (n))
-
-(defmethod fact ((n zero?))
-  0)
 
 (defmethod fact ((n integer?))
   (* n (fact (- n 1))))
 
 (defmethod fact ((n zero?))
   1)
+
+(defmethod fact ((n zero?))
+  0)
+
+(defmethod fact ((n zero?))
+  1)
+
+;;;;;;;;;;;;;;;
+;(fact 5.5)
+;;;;;;;;;;;;;;;;;
 
 ;;; Add example
 (defgeneric add (x y))
@@ -148,6 +165,26 @@
 
 (defmethod add ((x even?) (y even?))
   (displayln "even? even?")
+  (+ x y))
+
+(defmethod add ((x odd?) (y odd?))
+  (displayln "odd? odd?")
+  (+ x y))
+
+(defmethod add ((x even?) (y odd?))
+  (displayln "even? odd?")
+  (+ x y))
+
+(defmethod add ((x odd?) (y even?))
+  (displayln "odd? even?")
+  (+ x y))
+
+(defmethod add ((x odd?) (y complex?))
+  (displayln "odd? complex?")
+  (+ x y))
+
+(defmethod add ((x positive?) (y complex?))
+  (displayln "positive? complex?")
   (+ x y))
 
 ;;; what are you test
@@ -197,3 +234,4 @@
 
 (define (p-m) 
   (map (lambda (x) (displayln (method-body x))) (generic-function-methods fact)))
+
