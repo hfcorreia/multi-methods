@@ -7,7 +7,7 @@
   #:property prop:procedure (lambda vars
                               (let* ((instance (car vars))
                                      (args (cdr vars))
-                                     (temp-method (find-method (generic-function-methods instance) args)))
+                                     (temp-method (car (find-methods (generic-function-methods instance) args))))
                                 (if (equal? (length (generic-function-parameters instance)) (length args))
                                     (eval `(,(method-body temp-method) ,@args))
                                     (error "Invalid number of args")))))
@@ -15,8 +15,12 @@
 (struct method (parameters body))
 
 ;;; Representation of a type
-(struct type (predicate [subtypes #:mutable]))
-(define type-tree (type 'T? '()))
+(struct type (predicate [supertype #:mutable]))
+;;; Global predicate-hash
+(define king-type (type 'T? '()))
+(define predicates-hash (make-hash))
+(hash-set! predicates-hash 'T?  king-type)
+
 ;;;; Main Syntax Rules
 ;;; Defines a new generic function
 (define-syntax-rule
@@ -34,13 +38,14 @@
   (add-subtype predicate1 predicate2))
 
 ;;;; Aux Functions
+
 (define (make-gen-method method-name parameteres body)
   (set-generic-function-methods! method-name (update-gen-method method-name parameteres body)))
 
 (define (update-gen-method name parameters body)
   (define (update-gen-method-aux methods parameters body result)
     (cond ((null? methods) (append result (list (make-method parameters body))))
-          ((equal? parameters (method-parameters (car methods))) (update-gen-method-aux (cdr methods) parameters body result))
+          ((equal? parameters (method-parameters (car methods))) (append result (list (make-method parameters body)) (cdr methods)))
           (else (update-gen-method-aux (cdr methods) parameters body (append result (list (car methods)))))))
   (update-gen-method-aux (generic-function-methods name) parameters body '()))
 
@@ -52,82 +57,77 @@
   (if (null? parameters)
       '()
       (cons (caar parameters) (make-args-list (cdr parameters)))))
-
-(define (method-types method)
-  (define (method-types-aux parameters)
-    (if (null? parameters)
-        '()
-        (cons (eval (cadar parameters)) (method-types-aux (cdr parameters)))))
-  (method-types-aux (method-parameters method)))
-
-
+;; can-apply is true if the number of arguments is equal to the number of parameters
+;; and every parameter predicate is true when applied to the given argument
 (define (can-apply? parameters  args)
   (define (can-apply-aux parameters args)
     (cond ((or (null? parameters) (null? args)) #t)
-          ((not (apply (eval (cadar parameters)) (list (car args)))) #f) ;look?!?
+          ((not ((apply (eval (cadar parameters)) (list (car args)))) #f)
           (else (can-apply-aux (cdr parameters) (cdr args)))))
   (if (not(equal? (length parameters) (length args)))
       #f
       (can-apply-aux parameters args)))
 
-(define (find-method methods args)
-  (define (find-method-aux methods args)
-    (cond ((null? methods) (error "Method missing for arguments" args))
-          ((can-apply? (method-parameters (car methods)) args) (car methods))
-          (else (find-method (cdr methods) args))))
-  (find-method-aux (sort methods more-specific-method?) args)) 
+(define (find-methods methods args)
+  (displayln "BEFORE SORT")
+  (map (lambda (x) (displayln (method-body x))) (applicable-methods methods args))
+  (displayln "AFTER SORT")
+  (map (lambda (x) (displayln (method-body x))) (sort (applicable-methods methods args) more-specific-method?))
+  (sort (applicable-methods methods args) more-specific-method?))
 
-(define (add-subtype predicate1 predicate2)
-  (let ((found-type  (find-type predicate2)))
-    (if (false? found-type)
-        (set-type-subtypes! type-tree (append (type-subtypes type-tree) (list (type predicate2 (list (type predicate1 '()))))))
-        (set-type-subtypes! found-type (append (type-subtypes found-type) (list (type predicate1 '())))))))
+(define (applicable-methods methods args)
+  (define (applicable-methods-aux methods args result)
+    (cond ((null? methods) result)
+          ((can-apply? (method-parameters (car methods)) args) (applicable-methods-aux (cdr methods) args (append result (list (car methods)))))
+          (else (applicable-methods-aux (cdr methods) args result))))
+  (applicable-methods-aux methods args '()))
 
-(define (find-type predicate)
-  (define (find-type-aux predicate types)
-    (cond ((null? types) #f)
-          ((equal? predicate (type-predicate (car types))) (car types))
-          (else (let ((found-predicate (find-type-aux predicate (type-subtypes (car types)))))
-                  (if (not (false? found-predicate))
-                      found-predicate
-                      (find-type-aux predicate (type-subtypes (cdr types))))))))
-  (find-type-aux predicate (type-subtypes type-tree)))
+(define (add-subtype subtype supertype)
+  (let ((found-supertype (find-predicate supertype))
+        (found-subtype (find-predicate subtype)))
+    (cond ((and (not (false? found-subtype)) (not (false? found-supertype))); subtype and supertype allready exists
+           (set-type-supertype! found-subtype found-supertype))
+          ((and (not (false? found-subtype)) (false? found-supertype)) ; subtype exists but super doesn'tI
+           (set-type-supertype! found-subtype king-type)
+           (hash-set! predicates-hash supertype king-type))
+          ((and (false? found-subtype) (not (false? found-supertype))) ; subtype doesn't exist but super does
+           (hash-set! predicates-hash subtype (type subtype found-supertype)))
+          (else (let* ((super (type supertype king-type))
+                       (sub (type subtype super)))
+                  (hash-set! predicates-hash subtype sub) ;both types don't exist
+                  (hash-set! predicates-hash supertype super))))))
 
-
-(define (find-type-level predicate)
-  (define (find-type-level-aux types lvl)
-    (cond ((null? types) #f)
-          ((equal? predicate (type-predicate (car types))) lvl)
-          (else (let ((result (find-type-level-aux (type-subtypes (car types)) (add1 lvl))))
-                  (if (not (false? result))
-                      result
-                      (find-type-level-aux (cdr types) lvl))))))
-  (find-type-level-aux (type-subtypes type-tree) 1))
+(define (find-predicate predicate)
+  (if (hash-has-key? predicates-hash predicate)
+      (hash-ref predicates-hash predicate)
+      #f))
 
 (define (more-specific-method? method1 method2)
   (more-specific-predicates? (method-parameters method1) (method-parameters method2)))
 
-(define (more-specific-predicate? predicate1 predicate2)
-  (> (find-type-level predicate1) (find-type-level predicate2)))
 
 (define (more-specific-predicates? method-predicates1 method-predicates2)
+  (display "more-specific-predicates? - ")
+  (displayln (list method-predicates1 method-predicates2))
   (if (or (null? method-predicates1) (null? method-predicates2))
       #f
-      (or (more-specific-predicate? (eval (cadar method-predicates1)) (eval (cadar method-predicates2))) 
-          (more-specific-predicates? (cdr method-predicates1) (cdr method-predicates2)))))
+      (let ((p1 (hash-ref predicates-hash (eval (cadar method-predicates1)))) (p2 (hash-ref predicates-hash (eval (cadar method-predicates2)))))
+      (or (if (equal? p1 p2)
+              (more-specific-predicates? (cdr method-predicates1) (cdr method-predicates2))
+              (more-specific-predicate? (hash-ref predicates-hash (eval (cadar method-predicates1)))
+                                    (hash-ref predicates-hash (eval (cadar method-predicates2)))))
+          (begin (displayln (more-specific-predicates? (cdr method-predicates1) (cdr method-predicates2)))
+                 (more-specific-predicates? (cdr method-predicates1) (cdr method-predicates2)))))))
+
+(define (more-specific-predicate? predicate1 predicate2)
+  (display "more-specific-predicate? - ")
+  (displayln (list (type-predicate predicate1) (type-predicate predicate2)))
+  (cond ((equal? predicate1 king-type) (begin (displayln "FALSEEEE") #f))
+        ((equal? predicate2 king-type) #t)
+        ((equal? predicate1 predicate2) #t)
+        (else (more-specific-predicate? (type-supertype predicate1) predicate2))))
 
 ;;;; Test Examples
-;;; Aux test functions
-(define (print-tree)
-  (define (print-tree-aux types lvl)
-    (if (not (null? types))
-        (begin 
-          (print-tree-aux (type-subtypes (car types)) (+ lvl 1))
-          (displayln (cons (type-predicate (car types)) lvl))
-          (print-tree-aux (cdr types)  (+ lvl 1)))
-        #f))
-  (print-tree-aux (type-subtypes type-tree) 1))
-
 ;;; Factorial example
 (defgeneric fact (n))
 
@@ -146,11 +146,19 @@
 (defmethod add ((x number?) (y number?))
   (+ x y))
 
+(defmethod add ((x zero?) (y integer?))
+  (+ (* 10 y) 1))
+
+(defmethod add ((x integer?) (y zero?))
+  (+ (* 20 x) 2))
+
 (defmethod add ((x integer?) (y integer?))
   (+ x y 10000000))
 
 (defmethod add ((x string?) (y string?))
   (string-append x y))
+
+
 
 ;;; what are you test
 (defgeneric what-are-you? (x))
@@ -163,7 +171,26 @@
 
 ;;; Test
 (define (test-can-apply) (can-apply? '((x number?) (y number?)) '("12" 2)))
-(define (test-find-method) (find-method (generic-function-methods add) '(1 1)))
+(define (test-find-methods) (car (find-methods (generic-function-methods add) '(1 1))))
+
+(define m1 (car (generic-function-methods add))) ; number
+(define m2 (cadr (generic-function-methods add))) ; integer
+(define m3 (caddr (generic-function-methods add))) ; zero
+
+(define (dump-hierarquie father result)
+  (if (null? father)
+      result
+      (dump-hierarquie (type-supertype father) (append result (list (type-predicate father))))))
+
+
+
+(define (test-more-specific)
+  (displayln (method-parameters m1))
+  (displayln (method-parameters m2))
+  (displayln (method-parameters m3))
+  (displayln (more-specific-method? m1 m2))
+  (displayln (more-specific-method? m2 m3))
+  (displayln (more-specific-method? m1 m3)))
 
 ;;; Test subtypes
 (defsubtype complex? number?)
@@ -173,3 +200,8 @@
 (defsubtype positive? rational?)
 (defsubtype zero? integer?)
 (defsubtype string? zero?)
+
+(dump-hierarquie (hash-ref predicates-hash zero?) '())
+
+(define (p-m) 
+  (map (lambda (x) (displayln (method-body x))) (generic-function-methods fact)))
