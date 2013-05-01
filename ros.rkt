@@ -2,18 +2,30 @@
 (require racket/trace) ; Enables trace!
 
 ;;; Representation of a generic function
-(struct generic-function (parameters methods)
+(struct generic-function (parameters methods before after around)
   #:mutable
   #:property prop:procedure (lambda vars
                               (let* ((instance (car vars))
                                      (args (cdr vars))
-                                     (temp-method (find-method (generic-function-methods instance) args)))
-                                (if (equal? (length (generic-function-parameters instance)) (length args))
-                                    (eval `(,(method-body temp-method) ,@args))
-                                    (error "Invalid number of args")))))
-;;; Representation of a method
-(struct method (parameters body))
+                                     (around-methods (find-methods (generic-function-around instance) args))
+                                     (before-methods  (find-methods (generic-function-before instance) args))
+                                     (primary-methods (find-methods (generic-function-methods instance) args))
+                                     (after-methods (reverse (find-methods (generic-function-after instance) args))))                 
+                                (if (null? primary-methods) 
+                                    (error "Method missing for arguments" args)
+                                    (eval-generic-function around-methods before-methods primary-methods after-methods args)))))
 
+;;; eval-generic-function
+(define (eval-generic-function around before primary after args)      
+  (let ((result '()))
+    (map (lambda (method) (eval `(,(method-body (car around)) ,@args))) around)
+    (map (lambda (method) (eval `(,(method-body method) ,@args))) before)
+    (set! result (eval `(,(method-body (car primary)) ,@args)))
+    (map (lambda (method) (eval `(,(method-body method) ,@args))) after)
+    result))
+
+;;; Representation of a method
+(struct method (parameters body) #:mutable)
 ;;; Representation of a type
 (struct type (predicate [supertypes #:mutable]))
 ;;; Global predicate-hash
@@ -25,13 +37,27 @@
 ;;; Defines a new generic function
 (define-syntax-rule
   (defgeneric name parameters)
-  (define name (generic-function 'parameters '() )))
+  (define name (generic-function 'parameters '() '() '() '())))
 
 ;;; Defines a new generic method
 (define-syntax-rule
   (defmethod method-name ( (arg . predicate) ... ) instr ...)
-  (make-gen-method method-name '( (arg . predicate) ... ) '(begin instr ...)))
+  (make-gen-method method-name '( (arg . predicate) ... ) '(begin instr ...) (generic-function-methods method-name) set-generic-function-methods!))
 
+;;; Defines a new before generic method
+(define-syntax-rule
+  (defbefore method-name ( (arg . predicate) ...) instr ...)
+  (make-gen-method method-name '( (arg . predicate) ...) '(begin instr ...) (generic-function-before method-name) set-generic-function-before!))
+
+;;; Defines a new before generic method
+(define-syntax-rule
+  (defafter method-name ( (arg . predicate) ...) instr ...)
+  (make-gen-method method-name '( (arg . predicate) ...) '(begin instr ...) (generic-function-after method-name) set-generic-function-after!))
+
+;;; Defines a new around generic method
+(define-syntax-rule
+  (defaround method-name ( (arg . predicate) ...) instr ...)
+  (make-gen-method method-name '( (arg . predicate) ...) '(begin instr ...) (generic-function-around method-name) set-generic-function-around!))
 ;;; Defines subtype relations
 (define-syntax-rule
   (defsubtype predicate1 predicate2)
@@ -42,19 +68,19 @@
   (map (lambda (x) (eval (cadr x))) (method-parameters method)))
 
 ;;;; Aux Functions
-(define (make-gen-method method-name parameteres body)
-  (set-generic-function-methods! method-name (update-gen-method method-name parameteres body)))
-
-(define (update-gen-method name parameters body)
-  (define (update-gen-method-aux methods parameters body result)
-    (cond ((null? methods) (append result (list (make-method parameters body))))
-          ((equal? parameters (method-parameters (car methods))) (append result (list (make-method parameters body)) (cdr methods)))
-          (else (update-gen-method-aux (cdr methods) parameters body (append result (list (car methods)))))))
-  (update-gen-method-aux (generic-function-methods name) parameters body '()))
+(define (make-gen-method method-name parameters body methods setter)
+  (let ((methods-parameters (map (lambda (x) (method-parameters x)) methods)))
+    (if (not (false? (member parameters methods-parameters)))
+        (let ((method (car (filter (lambda(x) (equal? parameters (method-parameters x))) methods))))
+          (set-method-body! method `(lambda ,(method-args parameters) ,body)))
+        (setter method-name (append methods (list (make-method parameters body)))))))
 
 (define (make-method parameters body)
-  (let ((args (map (lambda (x) (car x)) parameters)))
+  (let ((args (method-args parameters)))
     (method parameters `(lambda ,args ,body))))
+
+(define (method-args parameters)
+  (map (lambda (x) (car x)) parameters))
 
 ;; can-apply is true if the number of arguments is equal to the number of parameters
 ;; and every parameter predicate is true when applied to the given argument
@@ -66,13 +92,13 @@
 
 (define (try-apply predicate arg)
   (with-handlers ([exn:fail? (lambda (exn) #f)])
-   (apply (eval predicate) arg)))
+    (apply (eval predicate) arg)))
 
-(define (find-method methods args)
+(define (find-methods methods args)
   (let ((found-methods (sort (applicable-methods methods args) more-specific-method?)))
     (if (not (null? found-methods))
-        (car found-methods)
-        (error "Method missing for arguments" args))))
+        found-methods
+        '())))
 
 (define (applicable-methods methods args)
   (filter (lambda (method) (can-apply? (method-parameters method) args)) methods))
@@ -120,6 +146,19 @@
   (or (not (false? (member type2 supertypes1)))
       (ormap (lambda (super) (more-specific-predicate? (type-supertypes super) type2)) supertypes1)))
 
+;;;; Define subtypes
+(defsubtype string? 'T?)
+
+(defsubtype complex? number?)
+(defsubtype real? complex?)
+(defsubtype rational? real?)
+(defsubtype integer? rational?)
+(defsubtype positive? rational?)
+
+(defsubtype odd? integer?)
+(defsubtype even? integer?)
+(defsubtype zero? even?)
+
 ;;;; Test Examples
 ;;; Factorial example
 (defgeneric fact (n))
@@ -136,12 +175,17 @@
 (defmethod fact ((n zero?))
   1)
 
-;;;;;;;;;;;;;;;
-;(fact 5.5)
-;;;;;;;;;;;;;;;;;
+(defbefore fact ((n number?))
+  (displayln "Start fact"))
+
+(defafter fact ((n number?))
+  (displayln "Fact end!"))
+
+(defaround fact ((n number?))
+  (displayln "I am around?!"))
 
 ;;; Add example
-(defgeneric add (x y))
+#|(defgeneric add (x y))
 
 (defmethod add ((x number?) (y number?))
   (displayln "number? number?")
@@ -216,22 +260,14 @@
   (displayln (more-specific-method? m1 m2))
   (displayln (more-specific-method? m2 m3))
   (displayln (more-specific-method? m1 m3)))
-
-
-;;; Test subtypes
-(defsubtype complex? number?)
-(defsubtype real? complex?)
-(defsubtype rational? real?)
-(defsubtype integer? rational?)
-(defsubtype positive? rational?)
-(defsubtype string? 'T?)
-
-(defsubtype odd? integer?)
-(defsubtype even? integer?)
-(defsubtype zero? even?)
+|#
 
 ;(dump-hierarquie (hash-ref predicates-hash zero?) '())
 
-(define (p-m) 
-  (map (lambda (x) (displayln (method-body x))) (generic-function-methods fact)))
-
+(define (show-methods instance)
+  (displayln "Befores:")
+  (map (lambda (x) (displayln (method-body x))) (generic-function-before instance))
+  (displayln "Methods:")
+  (map (lambda (x) (displayln (method-body x))) (generic-function-methods instance))
+  (displayln "Afters:")
+  (map (lambda (x) (displayln (method-body x))) (generic-function-after instance)))
