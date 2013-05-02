@@ -1,39 +1,69 @@
 #lang racket
-(require racket/trace) ; Enables trace!
+(require racket/provide)
 
 ;;; Representation of a generic function
 (struct generic-function (parameters methods before after around)
   #:mutable
-  #:property prop:procedure (lambda vars
-                              (let* ((instance (car vars))
-                                     (args (cdr vars))
-                                     (around-methods (find-methods (generic-function-around instance) args))
-                                     (before-methods  (find-methods (generic-function-before instance) args))
-                                     (primary-methods (find-methods (generic-function-methods instance) args))
-                                     (after-methods (reverse (find-methods (generic-function-after instance) args))))                 
-                                (if (null? primary-methods) 
-                                    (error "Method missing for arguments" args)
-                                    (eval-generic-function around-methods before-methods primary-methods after-methods args)))))
+  #:property prop:procedure 
+  (lambda vars
+    (let* ((instance (car vars))
+           (args (cdr vars))
+           (around-methods (find-methods (generic-function-around instance) args))
+           (before-methods  (find-methods (generic-function-before instance) args))
+           (primary-methods (find-methods (generic-function-methods instance) args))
+           (after-methods (reverse (find-methods (generic-function-after instance) args))))                 
+      (if (null? primary-methods) 
+          (error "Method missing for arguments" args)
+          (eval-generic-function around-methods before-methods primary-methods after-methods args)))))
 
-;;; eval-generic-function
-(define (eval-generic-function around before primary after args)      
+;;; Main eval of a generic method
+;;; Evaluates if exits around, before after and primary methods
+;;; This is done in a CLOS simular way
+(define (eval-generic-function around before primaries after args)
   (let ((result '()))
-    (map (lambda (method) (eval `(,(method-body (car around)) ,@args))) around)
+    (eval-methods around args)
     (map (lambda (method) (eval `(,(method-body method) ,@args))) before)
-    (set! result (eval `(,(method-body (car primary)) ,@args)))
+    (set! result (eval-methods primaries args))
     (map (lambda (method) (eval `(,(method-body method) ,@args))) after)
+    (set! next-methods '())
     result))
 
-;;; Representation of a method
-(struct method (parameters body) #:mutable)
-;;; Representation of a type
-(struct type (predicate [supertypes #:mutable]))
-;;; Global predicate-hash
-(define king-type (type 'T? '()))
-(define predicates-hash (make-hash))
-(hash-set! predicates-hash 'T?  king-type)
+;;; Evaluates methods that can call more applicable methods
+(define (eval-methods methods args)
+  (if (not (null? methods))
+      (begin (set! next-methods (cdr methods))
+             (eval `(,(method-body (car methods)) ,@args)))
+      #f))
 
-;;;; Main Syntax Rules
+;;; Tests if there exists a new applicable method
+(define (next-method?) (not (null? next-methods)))
+
+;;; Calls the next applicable method available
+(define (call-next-method arg ...)
+  (if (not (null? next-methods))
+      (let ((method (car next-methods)))
+        (set! next-methods (cdr next-methods))
+        (eval `(,(method-body method) ,@(list arg ...))))
+      (begin
+        (set! next-methods '())
+        (error "No-next-methdod with" (list arg ...)))))
+
+;;; Stores the next-method to call for call-next-method
+(define next-methods '())
+
+;;; Representation of a method
+;;; Has the list of parameters of the method and a lambda of the body.
+(struct method (parameters body) #:mutable)
+
+;;; Representation of a type
+;;; Has the corresponding predicate and a list of more specific predicates.
+(struct type (predicate [supertypes #:mutable]))
+
+;;; Defines the global type table
+(define predicate-hash (make-hash)) ;
+(define T-type (type 'T? '())) ; Super Type of all types
+(hash-set! predicate-hash 'T?  T-type)
+
 ;;; Defines a new generic function
 (define-syntax-rule
   (defgeneric name parameters)
@@ -58,97 +88,106 @@
 (define-syntax-rule
   (defaround method-name ( (arg . predicate) ...) instr ...)
   (make-gen-method method-name '( (arg . predicate) ...) '(begin instr ...) (generic-function-around method-name) set-generic-function-around!))
+
 ;;; Defines subtype relations
 (define-syntax-rule
   (defsubtype predicate1 predicate2)
   (add-subtype predicate1 predicate2))
 
-;;; method-types
+;;; Returns all predicates args for a given method
 (define (method-types method)
   (map (lambda (x) (eval (cadr x))) (method-parameters method)))
 
-;;;; Aux Functions
+;;; Add a new method to the generic-funtion methods list
+;;; In case of redefinition it overrides the existing method's lambda.
 (define (make-gen-method method-name parameters body methods setter)
-  (let ((methods-parameters (map (lambda (x) (method-parameters x)) methods)))
-    (if (not (false? (member parameters methods-parameters)))
-        (let ((method (car (filter (lambda(x) (equal? parameters (method-parameters x))) methods))))
-          (set-method-body! method `(lambda ,(method-args parameters) ,body)))
-        (setter method-name (append methods (list (make-method parameters body)))))))
+  (if (equal? (length (generic-function-parameters method-name)) (length parameters))
+      (let ((methods-parameters (map (lambda (x) (method-parameters x)) methods)))
+        (if (not (false? (member parameters methods-parameters)))
+            (let ((method (car (filter (lambda(x) (equal? parameters (method-parameters x))) methods))))
+              (set-method-body! method `(lambda ,(method-args parameters) ,body)))
+            (setter method-name (append methods (list (make-method parameters body))))))
+      (error "Method missing for arguments" parameters)))
 
+;;; Creates a new method given its arguments and its body
 (define (make-method parameters body)
   (let ((args (method-args parameters)))
     (method parameters `(lambda ,args ,body))))
 
+;;; Returns all orignal args for a given parameters list
 (define (method-args parameters)
   (map (lambda (x) (car x)) parameters))
 
-;; can-apply is true if the number of arguments is equal to the number of parameters
-;; and every parameter predicate is true when applied to the given argument
+;;: Tests if every parameter predicate is applicable to the given arguments
 (define (can-apply? parameters  args)
   (cond ((not (equal? (length parameters) (length args))) #f)
         ((or (null? parameters) (null? args)) #t)
         ((not (try-apply (cadar parameters) (list (car args)))) #f)
         (else (can-apply? (cdr parameters) (cdr args)))))
 
+;;; Encapsulates ocuring exceptions when check for applicable methods
 (define (try-apply predicate arg)
   (with-handlers ([exn:fail? (lambda (exn) #f)])
     (apply (eval predicate) arg)))
 
+;;; Returns all aplicable methods orderd by its specificity.
+;;; From the most specific to the least one.
 (define (find-methods methods args)
-  (let ((found-methods (sort (applicable-methods methods args) more-specific-method?)))
-    (if (not (null? found-methods))
-        found-methods
-        '())))
+  (sort (applicable-methods methods args) more-specific-method?))
 
+;;; Returns all applicable methods
 (define (applicable-methods methods args)
   (filter (lambda (method) (can-apply? (method-parameters method) args)) methods))
 
+;;; Adds a new subtype to the hash and updates their supertypes.
 (define (add-subtype subtype supertype)
-  (let ((found-supertype? (find-predicate supertype))
-        (found-subtype? (find-predicate subtype)))
+  (let ((found-supertype? (find-type supertype))
+        (found-subtype? (find-type subtype)))
     (cond 
       ;; subtype and supertype allready exists
       ((and (not (false? found-subtype?)) (not (false? found-supertype?)))
        (add-supertype found-subtype? found-supertype?))
       ;; subtype exists but super does not
       ((and (not (false? found-subtype?)) (false? found-supertype?))
-       (let ((super (type supertype (list king-type))))
+       (let ((super (type supertype (list T-type))))
          ((add-supertype found-subtype? super)
-          (hash-set! predicates-hash supertype super))))
+          (hash-set! predicate-hash supertype super))))
       ;; subtype doesn't exist but super does
       ((and (false? found-subtype?) (not (false? found-supertype?))) 
-       (hash-set! predicates-hash subtype (type subtype (list found-supertype?))))
+       (hash-set! predicate-hash subtype (type subtype (list found-supertype?))))
       ;; both super and sub types don't exist
-      (else (let* ((super (type supertype (list king-type)))             
+      (else (let* ((super (type supertype (list T-type)))             
                    (sub (type subtype (list super))))
-              (hash-set! predicates-hash subtype sub) 
-              (hash-set! predicates-hash supertype super))))))
+              (hash-set! predicate-hash subtype sub) 
+              (hash-set! predicate-hash supertype super))))))
 
+;;; Addes a new super type to a given type.
 (define (add-supertype type supertype)
   (set-type-supertypes! type (append (type-supertypes type) (list supertype))))
 
-(define (find-predicate predicate)
-  (if (hash-has-key? predicates-hash predicate)
-      (hash-ref predicates-hash predicate)
-      #f))
+;;; Returns a type or #f otherwise
+(define (find-type predicate)
+  (if (hash-has-key? predicate-hash predicate) (hash-ref predicate-hash predicate) #f))
 
+;;; Checks if method1 is more specific than method2
 (define (more-specific-method? method1 method2)
+  (define (more-specific-predicates? method-predicates1 method-predicates2)
+    (let ((p1 (hash-ref predicate-hash (eval (cadar method-predicates1)))) 
+          (p2 (hash-ref predicate-hash (eval (cadar method-predicates2)))))
+      (cond ((or (null? method-predicates1) (null? method-predicates2)) #f)
+            ((not (equal? p1 p2)) (more-specific-predicate? (type-supertypes p1) p2))
+            (else (more-specific-predicates? (cdr method-predicates1) (cdr method-predicates2))))))
   (more-specific-predicates? (method-parameters method1) (method-parameters method2)))
 
-(define (more-specific-predicates? method-predicates1 method-predicates2)
-  (let ((p1 (hash-ref predicates-hash (eval (cadar method-predicates1)))) 
-        (p2 (hash-ref predicates-hash (eval (cadar method-predicates2)))))
-    (cond ((or (null? method-predicates1) (null? method-predicates2)) #f)
-          ((not (equal? p1 p2)) (more-specific-predicate? (type-supertypes p1) p2))
-          (else (more-specific-predicates? (cdr method-predicates1) (cdr method-predicates2))))))
-
+;;; Checks if their type2 belongs in any of the supertypes of type1
 (define (more-specific-predicate? supertypes1 type2)
   (or (not (false? (member type2 supertypes1)))
       (ormap (lambda (super) (more-specific-predicate? (type-supertypes super) type2)) supertypes1)))
 
-;;;; Define subtypes
+;;; Predefined types
 (defsubtype string? 'T?)
 
+(defsubtype complex? number?)
 (defsubtype complex? number?)
 (defsubtype real? complex?)
 (defsubtype rational? real?)
@@ -159,115 +198,8 @@
 (defsubtype even? integer?)
 (defsubtype zero? even?)
 
-;;;; Test Examples
-;;; Factorial example
-(defgeneric fact (n))
-
-(defmethod fact ((n integer?))
-  (* n (fact (- n 1))))
-
-(defmethod fact ((n zero?))
-  1)
-
-(defmethod fact ((n zero?))
-  0)
-
-(defmethod fact ((n zero?))
-  1)
-
-(defbefore fact ((n number?))
-  (displayln "Start fact"))
-
-(defafter fact ((n number?))
-  (displayln "Fact end!"))
-
-(defaround fact ((n number?))
-  (displayln "I am around?!"))
-
-;;; Add example
-#|(defgeneric add (x y))
-
-(defmethod add ((x number?) (y number?))
-  (displayln "number? number?")
-  (+ x y))
-
-(defmethod add ((x zero?) (y integer?))
-  (displayln "zero? integer?")
-  (+ x y))
-
-(defmethod add ((x integer?) (y zero?))
-  (displayln "integer? zero?")
-  (+ x y))
-
-(defmethod add ((x integer?) (y integer?))
-  (displayln "integer? integer?")
-  (+ x y))
-
-(defmethod add ((x string?) (y string?))
-  (displayln "string? string?")
-  (string-append x y))
-
-(defmethod add ((x even?) (y even?))
-  (displayln "even? even?")
-  (+ x y))
-
-(defmethod add ((x odd?) (y odd?))
-  (displayln "odd? odd?")
-  (+ x y))
-
-(defmethod add ((x even?) (y odd?))
-  (displayln "even? odd?")
-  (+ x y))
-
-(defmethod add ((x odd?) (y even?))
-  (displayln "odd? even?")
-  (+ x y))
-
-(defmethod add ((x odd?) (y complex?))
-  (displayln "odd? complex?")
-  (+ x y))
-
-(defmethod add ((x positive?) (y complex?))
-  (displayln "positive? complex?")
-  (+ x y))
-
-;;; what are you test
-(defgeneric what-are-you? (x))
-
-(defmethod what-are-you? ((x integer?))
-  "an integer")
-
-(defmethod what-are-you? ((x positive?))
-  "an integer")
-
-;;; Test
-(define (test-can-apply) (can-apply? '((x number?) (y number?)) '("12" 2)))
-(define (test-find-methods) (method-body (find-method (generic-function-methods add) '(1 1))))
-
-(define m1 (car (generic-function-methods add))) ; number
-(define m2 (cadr (generic-function-methods add))) ; integer
-(define m3 (caddr (generic-function-methods add))) ; zero
-
-(define (dump-hierarquie father result)
-  (if (null? father)
-      result
-      (dump-hierarquie (type-supertypes father) (append result (list (type-predicate father))))))
-
-(define (test-more-specific)
-  (displayln (method-parameters m1))
-  (displayln (method-parameters m2))
-  (displayln (method-parameters m3))
-  (displayln (more-specific-method? m1 m2))
-  (displayln (more-specific-method? m2 m3))
-  (displayln (more-specific-method? m1 m3)))
-|#
-
-;(dump-hierarquie (hash-ref predicates-hash zero?) '())
-
-(define (show-methods instance)
-  (displayln "Befores:")
-  (map (lambda (x) (displayln (method-body x))) (generic-function-before instance))
-  (displayln "Methods:")
-  (map (lambda (x) (displayln (method-body x))) (generic-function-methods instance))
-  (displayln "Afters:")
-  (map (lambda (x) (displayln (method-body x))) (generic-function-after instance)))
+;;; Exported functions
+(provide defgeneric (struct-out generic-function) defmethod 
+         defbefore defafter defaround
+         defsubtype method-types 
+         call-next-method next-method?)
