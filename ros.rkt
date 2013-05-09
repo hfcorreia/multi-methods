@@ -39,14 +39,19 @@
 (define (next-method?) (not (null? next-methods)))
 
 ;;; Calls the next applicable method available
-(define (call-next-method arg ...)
-  (if (not (null? next-methods))
-      (let ((method (car next-methods)))
-        (set! next-methods (cdr next-methods))
-        (apply (method-body method) (list arg ...)))
+(define (call-next-method ...)
+  (if (null? next-methods)
       (begin
         (set! next-methods '())
-        (error "No-next-methdod with" (list arg ...)))))
+        (error "No-next-method with" (list ...)))
+      (let ((method (car next-methods)))
+        (if (can-apply? (method-parameters method) (list ...))
+            (begin 
+              (set! next-methods (cdr next-methods))
+              (apply (method-body method) (list ...)))
+            (begin
+              (set! next-methods '())
+              (error "Call-next-method: cannot apply " (list ...)))))))
 
 ;;; Stores the next-method to call for call-next-method
 (define next-methods '())
@@ -67,9 +72,7 @@
 ;;; Defines a new generic function
 (define-syntax-rule
   (defgeneric name parameters)
-  (begin
-    (define name (generic-function 'parameters '() '() '() '()))
-    name))
+  (define name (generic-function 'parameters '() '() '() '())))
 
 ;;; Defines a new generic method
 (define-syntax-rule
@@ -102,7 +105,7 @@
 
 ;;; Returns all predicates args for a given method
 (define (method-types method)
-  (map (lambda (x) (cadr x)) (method-parameters method)))
+  (map (lambda (x)  x) (method-parameters method)))
 
 ;;; Add a new method to the generic-funtion methods list
 ;;; In case of redefinition it overrides the existing method's lambda.
@@ -111,11 +114,8 @@
       (let ((methods-parameters (map (lambda (x) (method-parameters x)) methods)))
         (if (not (false? (member parameters methods-parameters)))
             (let ((method (car (filter (lambda(x) (equal? parameters (method-parameters x))) methods))))
-              (set-method-body! method body)
-              method)
-            (let ((method (method parameters body)))
-              (setter method-name (append methods (list method)))
-              method)))
+              (set-method-body! method body))
+            (setter method-name (append methods (list (method parameters body))))))
       (error "Method missing for arguments" parameters)))
 
 ;;; Returns all orignal args for a given parameters list
