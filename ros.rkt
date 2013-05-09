@@ -21,18 +21,18 @@
 ;;; This is done in a CLOS simular way
 (define (eval-generic-function around before primaries after args)
   (let ((result '()))
-    (eval-methods around args)
-    (map (lambda (method) (eval `(,(method-body method) ,@args))) before)
-    (set! result (eval-methods primaries args))
-    (map (lambda (method) (eval `(,(method-body method) ,@args))) after)
+    (apply-methods around args)
+    (map (lambda (method) (apply (method-body method) args)) before)
+    (set! result (apply-methods primaries args))
+    (map (lambda (method) (apply (method-body method) args)) after)
     (set! next-methods '())
     result))
 
 ;;; Evaluates methods that can call more applicable methods
-(define (eval-methods methods args)
+(define (apply-methods methods args)
   (if (not (null? methods))
       (begin (set! next-methods (cdr methods))
-             (eval `(,(method-body (car methods)) ,@args)))
+             (apply (method-body (car methods)) args))
       #f))
 
 ;;; Tests if there exists a new applicable method
@@ -43,7 +43,7 @@
   (if (not (null? next-methods))
       (let ((method (car next-methods)))
         (set! next-methods (cdr next-methods))
-        (eval `(,(method-body method) ,@(list arg ...))))
+        (apply (method-body method) (list arg ...)))
       (begin
         (set! next-methods '())
         (error "No-next-methdod with" (list arg ...)))))
@@ -67,27 +67,33 @@
 ;;; Defines a new generic function
 (define-syntax-rule
   (defgeneric name parameters)
-  (define name (generic-function 'parameters '() '() '() '())))
+  (begin
+    (define name (generic-function 'parameters '() '() '() '()))
+    name))
 
 ;;; Defines a new generic method
 (define-syntax-rule
-  (defmethod method-name ( (arg . predicate) ... ) instr ...)
-  (make-gen-method method-name '( (arg . predicate) ... ) '(begin instr ...) (generic-function-methods method-name) set-generic-function-methods!))
+  (defmethod method-name ( (args predicates) ... ) instr ...)
+  (make-gen-method method-name (list predicates ...) (lambda (args ...) (begin instr ...)) 
+                   (generic-function-methods method-name) set-generic-function-methods!))
 
 ;;; Defines a new before generic method
 (define-syntax-rule
-  (defbefore method-name ( (arg . predicate) ...) instr ...)
-  (make-gen-method method-name '( (arg . predicate) ...) '(begin instr ...) (generic-function-before method-name) set-generic-function-before!))
+  (defbefore method-name ( (args predicates) ...) instr ...)
+  (make-gen-method method-name (list predicates ...) (lambda (args ...) (begin instr ...))
+                   (generic-function-before method-name) set-generic-function-before!))
 
 ;;; Defines a new before generic method
 (define-syntax-rule
-  (defafter method-name ( (arg . predicate) ...) instr ...)
-  (make-gen-method method-name '( (arg . predicate) ...) '(begin instr ...) (generic-function-after method-name) set-generic-function-after!))
+  (defafter method-name ( (args predicates) ...) instr ...)
+  (make-gen-method method-name (list predicates ...) (lambda (args ...) (begin instr ...)) 
+                   (generic-function-after method-name) set-generic-function-after!))
 
 ;;; Defines a new around generic method
 (define-syntax-rule
-  (defaround method-name ( (arg . predicate) ...) instr ...)
-  (make-gen-method method-name '( (arg . predicate) ...) '(begin instr ...) (generic-function-around method-name) set-generic-function-around!))
+  (defaround method-name ( (args predicates) ...) instr ...)
+  (make-gen-method method-name (list predicates ...) (lambda (args ...) (begin instr ...))
+                   (generic-function-around method-name) set-generic-function-around!))
 
 ;;; Defines subtype relations
 (define-syntax-rule
@@ -96,7 +102,7 @@
 
 ;;; Returns all predicates args for a given method
 (define (method-types method)
-  (map (lambda (x) (eval (cadr x))) (method-parameters method)))
+  (map (lambda (x) (cadr x)) (method-parameters method)))
 
 ;;; Add a new method to the generic-funtion methods list
 ;;; In case of redefinition it overrides the existing method's lambda.
@@ -105,14 +111,12 @@
       (let ((methods-parameters (map (lambda (x) (method-parameters x)) methods)))
         (if (not (false? (member parameters methods-parameters)))
             (let ((method (car (filter (lambda(x) (equal? parameters (method-parameters x))) methods))))
-              (set-method-body! method `(lambda ,(method-args parameters) ,body)))
-            (setter method-name (append methods (list (make-method parameters body))))))
+              (set-method-body! method body)
+              method)
+            (let ((method (method parameters body)))
+              (setter method-name (append methods (list method)))
+              method)))
       (error "Method missing for arguments" parameters)))
-
-;;; Creates a new method given its arguments and its body
-(define (make-method parameters body)
-  (let ((args (method-args parameters)))
-    (method parameters `(lambda ,args ,body))))
 
 ;;; Returns all orignal args for a given parameters list
 (define (method-args parameters)
@@ -122,13 +126,13 @@
 (define (can-apply? parameters  args)
   (cond ((not (equal? (length parameters) (length args))) #f)
         ((or (null? parameters) (null? args)) #t)
-        ((not (try-apply (cadar parameters) (list (car args)))) #f)
+        ((not (try-apply (car parameters) (list (car args)))) #f)
         (else (can-apply? (cdr parameters) (cdr args)))))
 
 ;;; Encapsulates ocuring exceptions when check for applicable methods
 (define (try-apply predicate arg)
   (with-handlers ([exn:fail? (lambda (exn) #f)])
-    (apply (eval predicate) arg)))
+    (apply predicate arg)))
 
 ;;; Returns all aplicable methods orderd by its specificity.
 ;;; From the most specific to the least one.
@@ -172,8 +176,8 @@
 ;;; Checks if method1 is more specific than method2
 (define (more-specific-method? method1 method2)
   (define (more-specific-predicates? method-predicates1 method-predicates2)
-    (let ((p1 (hash-ref predicate-hash (eval (cadar method-predicates1)))) 
-          (p2 (hash-ref predicate-hash (eval (cadar method-predicates2)))))
+    (let ((p1 (hash-ref predicate-hash (car method-predicates1))) 
+          (p2 (hash-ref predicate-hash (car method-predicates2))))
       (cond ((or (null? method-predicates1) (null? method-predicates2)) #f)
             ((not (equal? p1 p2)) (more-specific-predicate? (type-supertypes p1) p2))
             (else (more-specific-predicates? (cdr method-predicates1) (cdr method-predicates2))))))
@@ -183,20 +187,6 @@
 (define (more-specific-predicate? supertypes1 type2)
   (or (not (false? (member type2 supertypes1)))
       (ormap (lambda (super) (more-specific-predicate? (type-supertypes super) type2)) supertypes1)))
-
-;;; Predefined types
-(defsubtype string? 'T?)
-
-(defsubtype complex? number?)
-(defsubtype complex? number?)
-(defsubtype real? complex?)
-(defsubtype rational? real?)
-(defsubtype integer? rational?)
-(defsubtype positive? rational?)
-
-(defsubtype odd? integer?)
-(defsubtype even? integer?)
-(defsubtype zero? even?)
 
 ;;; Exported functions
 (provide defgeneric (struct-out generic-function) defmethod 
